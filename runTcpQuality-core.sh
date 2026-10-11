@@ -123,6 +123,7 @@ REMOTE_CDN4_NODES=()
 REMOTE_CDN6_NODES=()
 REMOTE_CERNET_NODES=()
 REMOTE_CERNET2_NODES=()
+REMOTE_TELEGRAM_DC_NODES=()
 
 # ===================== 依赖与权限检查 =====================
 init_privilege() {
@@ -412,16 +413,17 @@ INTERNATIONAL_SITE_TARGETS=(
   'Zoom API|api.zoom.us'
 )
 
-# Telegram 客户端内置的 MTProto DC 启动接入点；不是按本机实时获取的 help.getConfig 列表。
-# Telegram 可按负载和用户位置更新 DC 接入点，因此此列表需要维护。
-# 格式：DC 编号|IPv4|IPv6。
-INTERNATIONAL_TELEGRAM_DC_TARGETS=(
-  '1|149.154.175.50|2001:b28:f23d:f001::a'
-  '2|149.154.167.51|2001:67c:4e8:f002::a'
-  '3|149.154.175.100|2001:b28:f23d:f003::a'
-  '4|149.154.167.91|2001:67c:4e8:f004::a'
-  '5|149.154.171.5|2001:b28:f23f:f005::a'
+# Telegram DC 引导地址，中央 getNodes 服务暂不可用时作为客户端兜底。
+# 格式：DC 编号|IPv4|IPv6|IPv4 端口|IPv6 端口。
+INTERNATIONAL_TELEGRAM_DC_BOOTSTRAP_TARGETS=(
+  '1|149.154.175.50|2001:b28:f23d:f001::a|443|443'
+  '2|149.154.167.51|2001:67c:4e8:f002::a|443|443'
+  '3|149.154.175.100|2001:b28:f23d:f003::a|443|443'
+  '4|149.154.167.91|2001:67c:4e8:f004::a|443|443'
+  '5|149.154.171.5|2001:b28:f23f:f005::a|443|443'
 )
+INTERNATIONAL_TELEGRAM_DC_TARGETS=("${INTERNATIONAL_TELEGRAM_DC_BOOTSTRAP_TARGETS[@]}")
+INTERNATIONAL_TELEGRAM_NODES_REFRESHED=0
 
 INTERNATIONAL_CDN_TARGETS=(
   'Akamai Edge|Akamai|www.akamai.com|'
@@ -585,10 +587,15 @@ load_remote_nodes() {
   fi
   rm -f "$err"
 
-  REMOTE_CDN4_NODES=()
-  REMOTE_CDN6_NODES=()
-  REMOTE_CERNET_NODES=()
-  REMOTE_CERNET2_NODES=()
+  if [ "$scope" = "telegram" ]; then
+    REMOTE_TELEGRAM_DC_NODES=()
+  else
+    REMOTE_CDN4_NODES=()
+    REMOTE_CDN6_NODES=()
+    REMOTE_CERNET_NODES=()
+    REMOTE_CERNET2_NODES=()
+    REMOTE_TELEGRAM_DC_NODES=()
+  fi
 
   while IFS= read -r line; do
     line=${line//$'\t'/'|'}
@@ -601,12 +608,14 @@ load_remote_nodes() {
       cdn:6) REMOTE_CDN6_NODES+=("$prov|$isp|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-80}") ;;
       cernet:4) REMOTE_CERNET_NODES+=("$prov|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-443}") ;;
       cernet2:6) REMOTE_CERNET2_NODES+=("$prov|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-443}") ;;
+      telegram:4|telegram:6) REMOTE_TELEGRAM_DC_NODES+=("$prov|$family|$ip|$port") ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
 
   if [ "${#REMOTE_CDN4_NODES[@]}" -gt 0 ] || [ "${#REMOTE_CDN6_NODES[@]}" -gt 0 ] ||
-     [ "${#REMOTE_CERNET_NODES[@]}" -gt 0 ] || [ "${#REMOTE_CERNET2_NODES[@]}" -gt 0 ]; then
+     [ "${#REMOTE_CERNET_NODES[@]}" -gt 0 ] || [ "${#REMOTE_CERNET2_NODES[@]}" -gt 0 ] ||
+     [ "${#REMOTE_TELEGRAM_DC_NODES[@]}" -gt 0 ]; then
     REMOTE_NODES_LOADED=1
     return 0
   fi
@@ -622,6 +631,55 @@ require_remote_nodes() {
   echo -e "${DIM}    getNodes: ${GET_NODES_LAST_URL:-${GET_NODES_URL}}${NC}"
   [ -n "$GET_NODES_LAST_ERROR" ] && echo -e "${DIM}    curl: ${GET_NODES_LAST_ERROR}${NC}"
   exit 1
+}
+
+refresh_international_telegram_targets() {
+  [ "$INTERNATIONAL_TELEGRAM_NODES_REFRESHED" -eq 1 ] && return 0
+  INTERNATIONAL_TELEGRAM_NODES_REFRESHED=1
+  load_remote_nodes "telegram" || return 1
+
+  local entry dc_id family ip port index dynamic_count=0
+  local fallback_entry fallback_dc_id fallback_ipv4 fallback_ipv6 fallback_port4 fallback_port6
+  local ipv4 ipv6 port4 port6
+  local -a remote_ipv4=("" "" "" "" "") remote_ipv6=("" "" "" "" "")
+  local -a remote_port4=("" "" "" "" "") remote_port6=("" "" "" "" "")
+  local -a targets=()
+
+  for entry in "${REMOTE_TELEGRAM_DC_NODES[@]}"; do
+    IFS='|' read -r dc_id family ip port <<< "$entry"
+    dc_id=${dc_id#DC}
+    case "$dc_id" in 1|2|3|4|5) ;; *) continue ;; esac
+    index=$((dc_id - 1))
+    case "$family" in
+      4)
+        if [ -z "${remote_ipv4[$index]}" ]; then
+          remote_ipv4[$index]="$ip"
+          remote_port4[$index]="$port"
+          dynamic_count=$((dynamic_count + 1))
+        fi
+        ;;
+      6)
+        if [ -z "${remote_ipv6[$index]}" ]; then
+          remote_ipv6[$index]="$ip"
+          remote_port6[$index]="$port"
+          dynamic_count=$((dynamic_count + 1))
+        fi
+        ;;
+    esac
+  done
+  [ "$dynamic_count" -gt 0 ] || return 1
+
+  for fallback_entry in "${INTERNATIONAL_TELEGRAM_DC_BOOTSTRAP_TARGETS[@]}"; do
+    IFS='|' read -r fallback_dc_id fallback_ipv4 fallback_ipv6 fallback_port4 fallback_port6 <<< "$fallback_entry"
+    index=$((fallback_dc_id - 1))
+    ipv4=${remote_ipv4[$index]:-$fallback_ipv4}
+    ipv6=${remote_ipv6[$index]:-$fallback_ipv6}
+    port4=${remote_port4[$index]:-$fallback_port4}
+    port6=${remote_port6[$index]:-$fallback_port6}
+    targets+=("$fallback_dc_id|$ipv4|$ipv6|$port4|$port6")
+  done
+  INTERNATIONAL_TELEGRAM_DC_TARGETS=("${targets[@]}")
+  return 0
 }
 
 print_cdn_entries() {
@@ -684,7 +742,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
-  同时探测 Telegram DC1-DC5 的 TCP/443 延迟；使用内置 IPv4/IPv6 启动接入点，自动检测可用地址族并跳过不可用地址族。
+  同时探测 Telegram DC1-DC5；地址和端口从中央 getNodes 服务拉取，自动检测可用地址族并跳过不可用地址族，服务不可用时使用内置引导地址。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
   国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
@@ -3595,13 +3653,13 @@ international_test_one() {
 }
 
 international_telegram_dc_test_one() {
-  local idx="$1" family="$2" dc_id="$3" target_ip="$4"
+  local idx="$1" family="$2" dc_id="$3" target_ip="$4" port="${5:-443}"
   local outfile="${RESULT_DIR}/internet_${idx}" result status _prov _isp _host ip sent rcv loss lat family_name
   local PACKETS="$INTERNATIONAL_PACKETS"
   local name="Telegram DC${dc_id}"
   family_name="IPv${family}"
 
-  result=$(probe_target "internet" "$family" "$name" "网站" "$target_ip" "$target_ip" 443 "$idx" "telegram-dc${dc_id}-ipv${family}")
+  result=$(probe_target "internet" "$family" "$name" "网站" "$target_ip" "$target_ip" "$port" "$idx" "telegram-dc${dc_id}-ipv${family}")
   IFS='|' read -r status _prov _isp _host ip sent rcv loss lat <<< "$result"
   printf '%s|网站|%s-%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$status" "$name" "$family_name" "$target_ip" "$ip" "$sent" "$rcv" "$loss" "$lat" "$family" \
@@ -3757,9 +3815,10 @@ international_latency_test_one() {
 }
 
 run_international_tests() {
-  local idx=0 launched=0 entry name provider domain path category total latency_expected=0 dc_id dc_ipv4 dc_ipv6 target_ip
+  local idx=0 launched=0 entry name provider domain path category total latency_expected=0 dc_id dc_ipv4 dc_ipv6 dc_port4 dc_port6 target_ip target_port
   local row_key region label host port v6_port fallback_host fallback_port fallback_v6_host fallback_v6_port family direction
   local -a latency_families=()
+  refresh_international_telegram_targets || true
   mapfile -t latency_families < <(international_latency_families)
   total=$(international_total_task_count)
   INTERNATIONAL_PROGRESS_TOTAL="$total"
@@ -3820,18 +3879,20 @@ run_international_tests() {
 
   for family in "${latency_families[@]}"; do
     for entry in "${INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}"; do
-      IFS='|' read -r dc_id dc_ipv4 dc_ipv6 <<< "$entry"
+      IFS='|' read -r dc_id dc_ipv4 dc_ipv6 dc_port4 dc_port6 <<< "$entry"
       if [ "$family" = "4" ]; then
         target_ip="$dc_ipv4"
+        target_port="$dc_port4"
       else
         target_ip="$dc_ipv6"
+        target_port="$dc_port6"
       fi
       idx=$((idx + 1))
       while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
-      international_telegram_dc_test_one "$idx" "$family" "$dc_id" "$target_ip" &
+      international_telegram_dc_test_one "$idx" "$family" "$dc_id" "$target_ip" "$target_port" &
       launched=$((launched + 1))
       show_progress
     done
@@ -4118,6 +4179,7 @@ run_international_mode() {
   check_curl
   check_nping
   detect_ip_stack
+  refresh_international_telegram_targets || true
   if ipv4_available; then
     echo -e "$GREEN[√] 国际互联检测到可用 IPv4$NC"
   else
@@ -4128,7 +4190,7 @@ run_international_mode() {
   else
     echo -e "$YELLOW[!] 国际互联未检测到可用 IPv6，跳过 IPv6 探测$NC"
   fi
-  echo -e "${DIM}  国际互联网站/CDN及 Telegram DC: $(international_task_count)  DC1-DC5: ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}×$(international_latency_family_count) 个地址族  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联网站/CDN及 Telegram DC: $(international_task_count)  DC1-DC5: ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}×$(international_latency_family_count) 个地址族，端口采用 getNodes 返回值  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
