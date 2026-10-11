@@ -4190,7 +4190,7 @@ run_international_mode() {
   else
     echo -e "$YELLOW[!] 国际互联未检测到可用 IPv6，跳过 IPv6 探测$NC"
   fi
-  echo -e "${DIM}  国际互联网站/CDN及 Telegram DC: $(international_task_count)  DC1-DC5: ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}×$(international_latency_family_count) 个地址族，端口采用 getNodes 返回值  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联探测${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
