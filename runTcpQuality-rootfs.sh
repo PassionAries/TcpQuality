@@ -30,14 +30,12 @@ fi
 TCPQUALITY_TCP_INFO_SOURCE="${TCPQUALITY_TCP_INFO_SOURCE:-}"
 TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE:-}"
 TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE:-}"
-TCPQUALITY_IPQUALITY_SCRIPT_SOURCE="${TCPQUALITY_IPQUALITY_SCRIPT_SOURCE:-}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
 NEXTTRACE_DOWNLOAD_TIMEOUT="${TCPQUALITY_NEXTTRACE_DOWNLOAD_TIMEOUT:-600}"
 DEBUG_MODE=0
 MIN_ROOTFS_FREE_KB=$((700 * 1024))
-IPQUALITY_REQUESTED=0
 
 usage() {
   cat <<'EOF'
@@ -107,7 +105,7 @@ answer_is_no() {
 }
 
 configure_interactive_args() {
-  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0 run_ipquality=0 upload_rank=1
+  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0 upload_rank=1
   local -a selected_args=()
 
   print_interactive_intro
@@ -130,15 +128,12 @@ configure_interactive_args() {
     ALLOW_SPEEDTEST=1
   fi
 
-  answer=$(prompt_answer "运行IP质量测试？（回车默认 'y'）[y/n]：" "y")
-  answer_is_no "$answer" || run_ipquality=1
-
   answer=$(prompt_answer "上传并生成在线报告链接？（回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" && upload_rank=0
 
   if [ "$run_route" -eq 0 ]; then
     if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] &&
-       [ "$run_speedtest" -eq 0 ] && [ "$run_ipquality" -eq 0 ]; then
+       [ "$run_speedtest" -eq 0 ]; then
       die "未选择任何测试项目"
     fi
   fi
@@ -157,16 +152,9 @@ configure_interactive_args() {
       selected_args+=("--speedtest")
     fi
   fi
-  [ "$run_ipquality" -eq 1 ] && selected_args+=("--ip-quality")
-
   if [ "$run_route" -eq 1 ] && [ "$run_edu" -eq 1 ] &&
      [ "$run_intl" -eq 1 ] && [ "$run_speedtest" -eq 1 ]; then
     selected_args=("--all")
-    if [ "$run_ipquality" -eq 1 ]; then
-      selected_args+=("--ip-quality")
-    else
-      selected_args+=("--no-ip-quality")
-    fi
   fi
 
   [ "$upload_rank" -eq 0 ] && selected_args+=("--no-rank-upload")
@@ -194,17 +182,6 @@ has_debug_arg() {
     [ "$arg" = "--debug" ] && return 0
   done
   return 1
-}
-
-ip_quality_args_requested() {
-  local arg requested=0
-  for arg in "$@"; do
-    case "$arg" in
-      --ip-quality|--all) requested=1 ;;
-      --no-ip-quality) requested=0 ;;
-    esac
-  done
-  [ "$requested" -eq 1 ]
 }
 
 while [ "$#" -gt 0 ]; do
@@ -289,10 +266,6 @@ if [ "$#" -gt 0 ]; then
 else
   echo "[i] 主脚本参数: 默认三网回程测试"
 fi
-if ip_quality_args_requested "$@"; then
-  IPQUALITY_REQUESTED=1
-fi
-
 for arg in "$@"; do
   case "$arg" in
     --speedtest-staged|--only-speedtest-staged)
@@ -1016,14 +989,13 @@ install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
     if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
        env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt' &&
-       { [ "$IPQUALITY_REQUESTED" -eq 0 ] || env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c 'command -v python3 >/dev/null 2>&1'; }; then
+         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt'; then
       echo "[√] 预构建 rootfs 依赖已就绪"
       return 0
     fi
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod nmap ncurses-bin bpftrace python3 sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod nmap ncurses-bin bpftrace sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
       >"$apt_log" 2>&1; then
       echo "[X] Debian rootfs 依赖安装失败" >&2
       echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
@@ -1036,7 +1008,7 @@ install_guest_deps() {
   else
     local apk_log="$GUEST_TMP_HOST/alpine-rootfs-apk.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
-      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod ncurses nmap-nping python3 sed tar traceroute tzdata' \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod ncurses nmap-nping sed tar traceroute tzdata' \
       >"$apk_log" 2>&1; then
       echo "[X] Alpine rootfs 依赖安装失败" >&2
       echo "[i] apk 日志已保留: $apk_log" >&2
@@ -1062,22 +1034,15 @@ speedtest_args_requested() {
 }
 
 resolve_tcpquality_asset() {
-  local env_name="$1" file_name="$2" cache_file="$3" configured candidate raw_base upstream_base prefer_remote
+  local env_name="$1" file_name="$2" cache_file="$3" configured candidate raw_base upstream_base
   local -a raw_bases=()
-  prefer_remote=0
   configured="${!env_name:-}"
   if [ -n "$configured" ] && [ -r "$configured" ]; then
     printf '%s\n' "$configured"
     return 0
   fi
   candidate="$SCRIPT_DIR/$file_name"
-  # When the beta source is selected, a local runIpQuality.sh can belong to
-  # an older release.  Try the selected source first and use local only as a
-  # last-resort offline fallback.
-  if [ "$file_name" = "runIpQuality.sh" ] && [ -n "${TCPQUALITY_RAW_BASE:-}" ]; then
-    prefer_remote=1
-  fi
-  if [ "$prefer_remote" -eq 0 ] && [ -r "$candidate" ]; then
+  if [ -r "$candidate" ]; then
     printf '%s\n' "$candidate"
     return 0
   fi
@@ -1169,21 +1134,10 @@ ensure_guest_tcp_info_support() {
 }
 
 prepare_guest_files() {
-  local nexttrace_path arg ipquality_path
+  local nexttrace_path arg
   mkdir -p "$ROOTFS_DIR/root" "$ROOTFS_DIR/usr/local/bin"
   cp "$TARGET_SCRIPT" "$ROOTFS_DIR/root/runTcpQuality.sh"
   chmod 0755 "$ROOTFS_DIR/root/runTcpQuality.sh"
-
-  if [ "$IPQUALITY_REQUESTED" -eq 1 ]; then
-    ipquality_path=$(resolve_tcpquality_asset TCPQUALITY_IPQUALITY_SCRIPT_SOURCE \
-      runIpQuality.sh "$RUNTIME_DIR/runIpQuality.sh") || {
-      echo "[X] 无法获取 runIpQuality.sh，无法运行 IP 质量检测" >&2
-      return 1
-    }
-    cp -L "$ipquality_path" "$ROOTFS_DIR/root/runIpQuality.sh"
-    chmod 0755 "$ROOTFS_DIR/root/runIpQuality.sh"
-
-  fi
 
   for arg in "$@"; do
     if [ "$arg" = "--only-speedtest" ]; then
@@ -1253,11 +1207,10 @@ if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
 fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
-  TCPQUALITY_RAW_BASE TCPQUALITY_ASSET_BASE TCPQUALITY_IPQUALITY_ASSET_BASE \
+  TCPQUALITY_RAW_BASE TCPQUALITY_ASSET_BASE \
   TCPQUALITY_TCP_INFO TCPQUALITY_TCP_INFO_PRELOAD TCPQUALITY_RETRANS_TRACE \
   TCPQUALITY_RETRANS_TRACE_SCRIPT TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT \
   TCPQUALITY_BPFTRACE_BTF \
-  IPQUALITY_API_BASE IPQUALITY_PAID_LOOKUP AI_PROBE_TIMEOUT_SECONDS \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
   http_proxy https_proxy no_proxy all_proxy; do
   if [ "${!env_name+x}" = x ]; then

@@ -56,7 +56,6 @@ bootstrap_nixos_environment() {
     nixpkgs#nmap
     nixpkgs#iperf3
     nixpkgs#jq
-    nixpkgs#python3
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
@@ -88,8 +87,6 @@ bootstrap_nixos_environment() {
           "LANG=${LANG:-C.UTF-8}" \
           "GET_NODES_URL=${GET_NODES_URL:-}" \
           "TCPQUALITY_REPORT_API=${TCPQUALITY_REPORT_API:-}" \
-          "IPQUALITY_API_BASE=${IPQUALITY_API_BASE:-}" \
-          "IPQUALITY_PAID_LOOKUP=${IPQUALITY_PAID_LOOKUP:-}" \
           TCPQUALITY_NIX_BOOTSTRAPPED=1 \
           "TCPQUALITY_NIX_TEMP_SCRIPT=$1" \
           NIXPKGS_ALLOW_UNFREE=1 \
@@ -298,19 +295,6 @@ SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
 SPEEDTEST_ONLY=0
-IPQUALITY_ENABLED=0
-IPQUALITY_DISABLED=0
-IPQUALITY_EXPLICIT=0
-IPQUALITY_OTHER_TEST=0
-IPQUALITY_ONLY=0
-# A bundled runIpQuality.sh may be stale (especially in an older rootfs
-# release).  Keep an explicitly supplied path authoritative, but let the
-# selected release source win before falling back to the bundled copy.
-IPQUALITY_SCRIPT="${TCPQUALITY_IPQUALITY_SCRIPT:-}"
-IPQUALITY_SCRIPT_TEMP=""
-IPQUALITY_TEXT_FILE=""
-IPQUALITY_JSON_FILE=""
-IPQUALITY_AVAILABLE=0
 INTERNATIONAL_ENABLED=0
 INTERNATIONAL_ONLY=0
 INTL_REQUESTED=0
@@ -360,15 +344,6 @@ cleanup_result_dir() {
   fi
   case "${TCPQUALITY_NIX_TEMP_SCRIPT:-}" in
     /tmp/tcpquality-nixos.*.sh) rm -f -- "$TCPQUALITY_NIX_TEMP_SCRIPT" ;;
-  esac
-  case "${IPQUALITY_SCRIPT_TEMP:-}" in
-    /tmp/tcpquality-ipquality-script.*) rm -f -- "$IPQUALITY_SCRIPT_TEMP" ;;
-  esac
-  case "${IPQUALITY_TEXT_FILE:-}" in
-    /tmp/tcpquality-ipquality-output.*) rm -f -- "$IPQUALITY_TEXT_FILE" ;;
-  esac
-  case "${IPQUALITY_JSON_FILE:-}" in
-    /tmp/tcpquality-ipquality-json.*) rm -f -- "$IPQUALITY_JSON_FILE" ;;
   esac
 }
 trap cleanup_result_dir EXIT
@@ -726,14 +701,12 @@ NixOS:
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
-  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联、单线程测速和 IP 质量
+  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和单线程测速
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
   --speedtest       追加单线程测速（默认北京/上海/广东三地三网）
   --only-speedtest  仅运行单线程测速（默认北京/上海/广东三地三网）
-  --ip-quality      运行 IP 质量、风险、AI 解锁和端口出站检测
-  --no-ip-quality   禁用 --all 中的 IP 质量检测
   --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
   --no-rank-upload  不上传报告，也不参与速度排名
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
@@ -819,27 +792,21 @@ parse_args() {
         ;;
       --only-large)
         ONLY_LARGE=1
-        IPQUALITY_OTHER_TEST=1
         shift
         ;;
       --cernet)
         TEST_CERNET=1
-        IPQUALITY_OTHER_TEST=1
         shift
         ;;
       --all)
         TEST_ALL=1
         SPEEDTEST_ENABLED=1
         INTERNATIONAL_ENABLED=1
-        IPQUALITY_ENABLED=1
-        IPQUALITY_DISABLED=0
-        IPQUALITY_OTHER_TEST=1
         shift
         ;;
       --route)
         ROUTE_MODE=1
         UPLOAD_REPORT=0
-        IPQUALITY_OTHER_TEST=1
         shift
         ;;
       --route-protocol)
@@ -852,30 +819,16 @@ parse_args() {
         ;;
       --speedtest)
         SPEEDTEST_ENABLED=1
-        IPQUALITY_OTHER_TEST=1
         shift
         ;;
       --only-speedtest)
         SPEEDTEST_ENABLED=1
         SPEEDTEST_ONLY=1
-        IPQUALITY_OTHER_TEST=1
-        shift
-        ;;
-      --ip-quality)
-        IPQUALITY_ENABLED=1
-        IPQUALITY_DISABLED=0
-        IPQUALITY_EXPLICIT=1
-        shift
-        ;;
-      --no-ip-quality)
-        IPQUALITY_ENABLED=0
-        IPQUALITY_DISABLED=1
         shift
         ;;
       --intl)
         INTL_REQUESTED=1
         INTERNATIONAL_ENABLED=1
-        IPQUALITY_OTHER_TEST=1
         [ "$REPORT_UPLOAD_FORCED_OFF" -eq 1 ] || UPLOAD_REPORT=1
         shift
         ;;
@@ -911,12 +864,6 @@ parse_args() {
         ;;
     esac
   done
-
-  [ "$IPQUALITY_DISABLED" -eq 1 ] && IPQUALITY_ENABLED=0
-
-  if [ "$IPQUALITY_EXPLICIT" -eq 1 ] && [ "$IPQUALITY_OTHER_TEST" -eq 0 ]; then
-    IPQUALITY_ONLY=1
-  fi
 
   if [ "$ONLY_LARGE" -eq 1 ]; then
     ONLY_IPV4=1
@@ -4216,130 +4163,6 @@ run_international_mode() {
 }
 
 # ===================== 国内单线程测速 =====================
-resolve_ip_quality_script() {
-  local configured raw_base cache_file candidate already local_candidate
-  local -a raw_bases=()
-  configured="${IPQUALITY_SCRIPT:-}"
-  if [ -n "$configured" ] && [ -r "$configured" ]; then
-    printf '%s\n' "$configured"
-    return 0
-  fi
-
-  configured="${TCPQUALITY_IPQUALITY_SCRIPT_SOURCE:-}"
-  if [ -n "$configured" ] && [ -r "$configured" ]; then
-    printf '%s\n' "$configured"
-    return 0
-  fi
-
-  for candidate in \
-    "${TCPQUALITY_IPQUALITY_ASSET_BASE:-}" \
-    "${TCPQUALITY_RAW_BASE:-}" \
-    "${TCPQUALITY_ASSET_BASE:-}" \
-    "https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta"; do
-    [ -n "$candidate" ] || continue
-    candidate="${candidate%/}"
-    already=0
-    for raw_base in "${raw_bases[@]}"; do
-      if [ "$raw_base" = "$candidate" ]; then
-        already=1
-        break
-      fi
-    done
-    [ "$already" -eq 0 ] && raw_bases+=("$candidate")
-  done
-
-  cache_file="${IPQUALITY_SCRIPT_TEMP:-}"
-  if [ -z "$cache_file" ]; then
-    cache_file=$(mktemp "${TMPDIR:-/tmp}/tcpquality-ipquality-script.XXXXXX") || return 1
-    IPQUALITY_SCRIPT_TEMP="$cache_file"
-  fi
-
-  for raw_base in "${raw_bases[@]}"; do
-    if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
-      "$raw_base/runIpQuality.sh" -o "$cache_file"; then
-      chmod 0755 "$cache_file"
-      printf '%s\n' "$cache_file"
-      return 0
-    fi
-  done
-
-  # Offline/local fallback only after trying the selected remote release.
-  local_candidate="$CORE_SCRIPT_DIR/runIpQuality.sh"
-  if [ -r "$local_candidate" ]; then
-    printf '%s\n' "$local_candidate"
-    return 0
-  fi
-  return 1
-}
-
-run_ip_quality_test() {
-  local script
-  local -a family_args=()
-  IPQUALITY_AVAILABLE=0
-  IPQUALITY_TEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/tcpquality-ipquality-output.XXXXXX") || return 0
-  IPQUALITY_JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/tcpquality-ipquality-json.XXXXXX") || return 0
-  : > "$IPQUALITY_JSON_FILE"
-
-  script=$(resolve_ip_quality_script 2>/dev/null || true)
-  if [ -z "$script" ]; then
-    printf '%s[X] 无法获取 runIpQuality.sh，已跳过 IP 质量检测%s\n' "$RED" "$NC" > "$IPQUALITY_TEXT_FILE"
-    return 0
-  fi
-  if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
-    family_args+=(--ipv4)
-  elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
-    family_args+=(--ipv6)
-  fi
-  if bash "$script" "${family_args[@]}" --json-file "$IPQUALITY_JSON_FILE" \
-    > "$IPQUALITY_TEXT_FILE" 2>&1; then
-    if [ -s "$IPQUALITY_JSON_FILE" ]; then
-      IPQUALITY_AVAILABLE=1
-    fi
-  fi
-}
-
-show_ip_quality_results() {
-  [ -s "${IPQUALITY_TEXT_FILE:-}" ] || return 0
-  printf '\n'
-  cat "$IPQUALITY_TEXT_FILE"
-}
-
-csv_quote() {
-  local value
-  value=$(printf '%s' "$1" | sed 's/"/""/g')
-  printf '"%s"' "$value"
-}
-
-append_ip_quality_csv() {
-  local csv="$1" json
-  [ "$IPQUALITY_AVAILABLE" -eq 1 ] || return 0
-  [ -s "${IPQUALITY_JSON_FILE:-}" ] || return 0
-  while IFS= read -r json || [ -n "$json" ]; do
-    [ -n "$json" ] || continue
-    printf 'IP质量,IP质量,,,,%s,OK,,,,,,,,,,\n' "$(csv_quote "$json")" >> "$csv"
-  done < "$IPQUALITY_JSON_FILE"
-}
-
-run_ip_quality_mode() {
-  local report_time csv
-  check_curl
-  check_command jq jq jq jq jq jq jq jq
-  echo -e "  ${DIM}正在执行 IP 质量检测，请稍候...${NC}"
-  run_ip_quality_test
-  show_ip_quality_results
-  [ "$IPQUALITY_AVAILABLE" -eq 1 ] || return 1
-
-  report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
-  csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
-  printf '\xEF\xBB\xBF' > "$csv"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms,iPerf3重传次数,iPerf3方向" >> "$csv"
-  append_ip_quality_csv "$csv"
-  if [ "$UPLOAD_REPORT" -eq 1 ]; then
-    upload_report "$csv" "${report_time%%（*}"
-  fi
-  printf '\n'
-}
-
 SPEEDTEST_IFACE=""
 SPEEDTEST_TOS_REGION="${TOS_REGION:-cn-beijing}"
 SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
@@ -6937,25 +6760,16 @@ run_speedtest_mode() {
     echo -e "${YELLOW}[!] 单线程测速未检测到可用 IPv6，跳过 IPv6 测速${NC}"
   fi
   collect_speedtest_results
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    run_ip_quality_test
-  fi
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$csv"
   echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms,iPerf3重传次数,iPerf3方向" >> "$csv"
   append_speedtest_csv "$csv"
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    append_ip_quality_csv "$csv"
-  fi
   clear
   print_header
   echo -e "  ${DIM}报告时间：${report_time}${NC}"
   echo
   show_speedtest_results
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    show_ip_quality_results
-  fi
   if [ "$UPLOAD_REPORT" -eq 1 ]; then
     echo
     upload_report "$csv" "${report_time%%（*}"
@@ -6979,11 +6793,6 @@ main() {
   if [ "$SPEEDTEST_ONLY" -eq 1 ]; then
     run_speedtest_mode
     exit 0
-  fi
-
-  if [ "$IPQUALITY_ONLY" -eq 1 ]; then
-    run_ip_quality_mode
-    exit $?
   fi
 
   if [ "$ROUTE_MODE" -eq 1 ]; then
@@ -7227,9 +7036,6 @@ main() {
     start_speedtest_background 0 0
     wait_speedtest_background
   fi
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    run_ip_quality_test
-  fi
   show_progress
   printf '\n'
 
@@ -7304,9 +7110,6 @@ main() {
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     append_speedtest_csv "$CSV"
   fi
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    append_ip_quality_csv "$CSV"
-  fi
 
   # ---- TUI 结果展示 ----
   clear
@@ -7343,10 +7146,6 @@ main() {
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     show_speedtest_results
     echo
-  fi
-
-  if [ "$IPQUALITY_ENABLED" -eq 1 ]; then
-    show_ip_quality_results
   fi
 
   if [ "$UPLOAD_REPORT" -eq 1 ]; then
